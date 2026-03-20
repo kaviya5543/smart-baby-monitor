@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Local Environment
+.env
+.DS_Store
+
+# Backend & Database
+server.js
+firebase-service-account.json
+firebase-service-account.json.json
+
+# Build leftovers
+dist/
+build/

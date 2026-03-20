@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mother Dashboard</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <script src="/socket.io/socket.io.js"></script>
+</head>
+
+<body class="dashboard-body">
+    <!-- Login Overlay -->
+    <div id="login-overlay" class="login-overlay">
+        <div class="login-card">
+            <h2>Mother Dashboard Access</h2>
+            <p>Please enter the security access code to view the baby monitor.</p>
+            <input type="password" id="access-code" placeholder="----" maxlength="4">
+            <button id="login-btn" class="login-btn">Unlock Dashboard</button>
+            <p id="login-error" class="error-msg hidden">Invalid Access Code</p>
+        </div>
+    </div>
+
+    <div id="dashboard-content" class="dashboard-container fade-in hidden">
+        <header class="page-header">
+            <div class="header-left">
+                <a href="index.html" class="btn outline-btn back-btn">&larr; Back Home</a>
+                <h1>Mother Dashboard</h1>
+            </div>
+            <div class="header-right">
+                <div id="status-badge" class="badge bg-green">
+                    <span class="pulse-dot"></span> System Active
+                </div>
+                <button id="delete-history-btn" class="btn danger-outline-btn">Delete History</button>
+                <button id="logout-btn" class="btn danger-outline-btn">Logout</button>
+            </div>
+        </header>
+
+        <main class="dashboard-main">
+            <!-- Live Feed Card -->
+            <div class="card feed-card">
+                <div class="card-header">
+                    <h2>Live Baby Camera</h2>
+                    <div class="badge bg-green">Live</div>
+                </div>
+                <div class="video-container">
+                    <img id="live-feed" alt="Waiting for camera feed..."
+                        style="width: 100%; height: 100%; object-fit: cover;">
+                    <div class="video-overlay-status">
+                        <span id="expression-status" class="indicator hidden">Reasoning...</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Latest Alert Banner -->
+            <div id="latest-alert" class="alert-banner hidden">
+                <div class="alert-icon">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path
+                            d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                        <line x1="12" y1="9" x2="12" y2="13" />
+                        <line x1="12" y1="17" x2="12.01" y2="17" />
+                    </svg>
+                </div>
+                <div class="alert-content">
+                    <h3 id="alert-title">New Alert Detected!</h3>
+                    <p id="alert-message">Waiting for alerts...</p>
+                    <p id="expression-message" class="expression-info hidden"></p>
+                </div>
+                <button id="dismiss-alert" class="icon-btn">&times;</button>
+            </div>
+
+            <!-- Alerts History -->
+            <div class="card history-card">
+                <div class="card-header">
+                    <h2>Alert History (Last 24 Hours)</h2>
+                    <span id="alert-count" class="badge">0 Alerts</span>
+                </div>
+
+                <div class="table-container">
+                    <table id="alerts-table">
+                        <thead>
+                            <tr>
+                                <th>Event Type</th>
+                                <th>Date</th>
+                                <th>Time</th>
+                            </tr>
+                        </thead>
+                        <tbody id="alerts-body">
+                            <!-- Dynamic rows via mother.js -->
+                            <tr id="empty-state">
+                                <td colspan="3" class="empty-cell">No alerts recorded yet.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Hidden audio element for alerts -->
+    <audio id="alert-sound" src="data:audio/mp3;base64,//NExAAAAANIAAAAAExBTUUzLjEwMKqq" preload="auto"></audio>
+
+    <script src="js/mother.js"></script>
+</body>
+
+</html>

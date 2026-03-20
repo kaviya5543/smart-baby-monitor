@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Baby Monitor - Camera & Audio</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+</head>
+<body>
+    <!-- Login Overlay -->
+    <div id="login-overlay" class="login-overlay">
+        <div class="login-card">
+            <h2>Baby Monitor Access</h2>
+            <p>Please enter the security access code to start monitoring.</p>
+            <input type="password" id="access-code" placeholder="----" maxlength="4">
+            <button id="login-btn" class="login-btn">Unlock Monitor</button>
+            <p id="login-error" class="error-msg hidden">Invalid Access Code</p>
+        </div>
+    </div>
+    <div id="monitor-content" class="container fade-in hidden">
+        <header class="page-header">
+            <a href="index.html" class="btn outline-btn back-btn">&larr; Back Home</a>
+            <h1>Baby Monitor</h1>
+            <div id="status-badge" class="badge bg-green">
+                <span class="pulse-dot"></span> Monitoring Baby...
+            </div>
+            <button id="logout-btn" class="logout-btn">Logout</button>
+        </header>
+
+        <main class="monitor-main">
+            <div class="video-container">
+                <video id="baby-video" autoplay muted playsinline></video>
+                <div class="video-overlay">
+                    <span id="motion-indicator" class="indicator hidden">Movement Detected</span>
+                    <span id="audio-indicator" class="indicator hidden">Cry Detected</span>
+                </div>
+                <!-- Hidden canvas for movement detection -->
+                <canvas id="video-canvas" class="hidden"></canvas>
+            </div>
+            
+            <div class="controls-card">
+                <h3>Detection Status</h3>
+                <div class="status-grid">
+                    <div class="status-item">
+                        <span class="label">Camera Stream:</span>
+                        <span id="cam-status" class="value success">Initializing...</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="label">Mic Stream:</span>
+                        <span id="mic-status" class="value success">Initializing...</span>
+                    </div>
+                    <div id="expression-result" class="status-item">
+                        <span class="label">Expression:</span>
+                        <span id="expression-status" class="value success">Ready</span>
+                    </div>
+                </div>
+
+                <div id="camera-error" class="error-box hidden mt-1">
+                    <p id="camera-error-msg"></p>
+                    <button id="retry-cam-btn" class="btn primary-btn mt-1">Retry Camera Access</button>
+                </div>
+
+                <div class="cry-analyzer-card mt-2">
+                    <div class="analyzer-header">
+                        <div class="analyzer-icon-pink">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10v4"/><path d="M7 6v12"/><path d="M11 3v18"/><path d="M15 8v8"/><path d="M19 11v2"/></svg>
+                        </div>
+                        <h4>Cry Analyzer</h4>
+                    </div>
+                    <div class="waveform-container">
+                        <div id="visualizer-bar" class="visualizer-bar"></div>
+                    </div>
+                    
+                    <div id="cry-result" class="cry-result mt-1">
+                        <span class="label">Cry Status:</span>
+                        <span id="cry-type" class="value">Analyzing...</span>
+                    </div>
+                    <div class="cry-result mt-1">
+                        <span class="label">Cry Reason:</span>
+                        <span id="expression-type" class="value">Monitoring...</span>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Script included at end -->
+    <script src="js/baby.js"></script>
+</body>
+</html>

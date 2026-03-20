@@ -1,0 +1,12 @@
+﻿
+
+    Directory: C:\flutt
+    er\bin\mingit\cmd
+
+
+Mode      LastWriteTime
+----      -------------
+-a----  10-02-2026     
+                  11:39
+
+

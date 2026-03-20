@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: smart-baby-monitor
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false # Set this manually in Render dashboard
+      - key: NODE_ENV
+        value: production
