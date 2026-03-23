@@ -1,5 +1,4 @@
 
-
     Directory: C:\Users
     \ELCOT\OneDrive\Des
     ktop\baby
@@ -43,5 +42,3 @@ dar--l  21-03-2026
                   13:11
 -a---l  20-03-2026     
                   17:22
-
-
