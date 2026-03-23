@@ -10,135 +10,119 @@ const server = http.createServer(app);
 const io = new Server(server);
 
 const PORT = process.env.PORT || 3000;
-// Dynamic access code will be fetched from Firestore
-let currentAccessCode = null;
+
+let db;
 
 // --- Firebase Initialization --- //
-let db;
-const serviceAccountPath = './firebase-service-account.json';
-
 try {
     if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-        console.log('Detected FIREBASE_SERVICE_ACCOUNT environment variable.');
-        try {
-            const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-            
-            // Robustly handle escaped newlines in private key
-            if (serviceAccount.private_key && typeof serviceAccount.private_key === 'string') {
-                serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
-            }
+        console.log('Using Firebase from ENV');
 
-            console.log('JSON parsing of FIREBASE_SERVICE_ACCOUNT successful.');
-            console.log('Project ID from Env Var:', serviceAccount.project_id);
-            console.log('Client Email from Env Var:', serviceAccount.client_email);
-            
-            admin.initializeApp({
-                credential: admin.credential.cert(serviceAccount)
-            });
-            db = admin.firestore();
-            console.log('Firebase initialized (Env Var)');
-        } catch (jsonError) {
-            console.error('JSON parsing error for FIREBASE_SERVICE_ACCOUNT:', jsonError.message);
-            console.log('Raw Env Var length:', process.env.FIREBASE_SERVICE_ACCOUNT.length);
-            console.log('First 50 chars of Env Var:', process.env.FIREBASE_SERVICE_ACCOUNT.substring(0, 50));
-        }
-    } else if (fs.existsSync(serviceAccountPath)) {
-        console.log('Using firebase-service-account.json');
-        const serviceAccount = require(serviceAccountPath);
+        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+
+        // ✅ FIX: Handle newline issue properly
+        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+
         admin.initializeApp({
             credential: admin.credential.cert(serviceAccount)
         });
+
         db = admin.firestore();
-        console.log('Firebase initialized (JSON File)');
-    } else {
-        console.warn('WARNING: No Firebase credentials found. Database features will be disabled.');
+        console.log('Firebase initialized (ENV)');
+    }
+    else if (fs.existsSync('./firebase-service-account.json')) {
+        console.log('Using local Firebase JSON');
+
+        const serviceAccount = require('./firebase-service-account.json');
+
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount)
+        });
+
+        db = admin.firestore();
+        console.log('Firebase initialized (LOCAL)');
+    }
+    else {
+        console.warn('No Firebase credentials found');
     }
 } catch (error) {
-    console.error('General Firebase initialization error:', error);
+    console.error('Firebase init error:', error);
 }
 
 // --- Middleware --- //
 app.use(express.static('public'));
 
-// --- Socket.IO Logic --- //
+// --- Socket.IO --- //
 io.on('connection', (socket) => {
-    console.log('A user connected:', socket.id);
+    console.log('User connected:', socket.id);
 
     socket.on('authenticate', async (inputCode) => {
-        const code = inputCode ? inputCode.toString().trim() : '';
-        console.log(`Authentication attempt with code: "${code}"`);
-        
+        const code = inputCode?.toString().trim();
+
         if (!db) {
-            console.log('Firebase not initialized. Falling back to default code.');
+            // fallback
             if (code === '7557') {
-                socket.emit('authenticated', { success: true });
+                return socket.emit('authenticated', { success: true });
             } else {
-                socket.emit('authenticated', { success: false, message: 'Firebase not connected. Use default code 7557.' });
+                return socket.emit('authenticated', {
+                    success: false,
+                    message: 'Firebase not connected. Use default code 7557.'
+                });
             }
-            return;
         }
 
         try {
-            const authDoc = await db.collection('config').doc('auth').get();
-            
-            if (!authDoc.exists) {
-                console.log('No access code set yet. Setting first code:', code);
+            const doc = await db.collection('config').doc('auth').get();
+
+            if (!doc.exists) {
                 await db.collection('config').doc('auth').set({ accessCode: code });
-                socket.emit('authenticated', { success: true });
-            } else {
-                const storedCode = authDoc.data().accessCode.toString().trim();
-                console.log(`Stored code found: "${storedCode}"`);
-                
-                if (code === storedCode) {
-                    console.log('Authentication successful');
-                    socket.emit('authenticated', { success: true });
-                    
-                    // Send initial alerts
-                    db.collection('alerts')
-                        .orderBy('timestamp', 'desc')
-                        .limit(50)
-                        .get()
-                        .then(snapshot => {
-                            const alerts = [];
-                            snapshot.forEach(doc => alerts.push(doc.data()));
-                            socket.emit('initial_alerts', alerts);
-                        })
-                        .catch(err => console.error('Error fetching initial alerts:', err));
-                } else {
-                    console.log(`Authentication failed: mismatch ("${code}" vs "${storedCode}")`);
-                    socket.emit('authenticated', { success: false, message: 'Invalid Access Code' });
-                }
+                return socket.emit('authenticated', { success: true });
             }
+
+            const storedCode = doc.data().accessCode?.toString().trim();
+
+            if (code === storedCode) {
+                socket.emit('authenticated', { success: true });
+
+                // send alerts
+                const snapshot = await db.collection('alerts')
+                    .orderBy('timestamp', 'desc')
+                    .limit(50)
+                    .get();
+
+                const alerts = snapshot.docs.map(doc => doc.data());
+                socket.emit('initial_alerts', alerts);
+
+            } else {
+                socket.emit('authenticated', {
+                    success: false,
+                    message: 'Invalid Access Code'
+                });
+            }
+
         } catch (err) {
-            console.error('Authentication error details:', err);
-            socket.emit('authenticated', { success: false, message: 'Server error during authentication' });
+            console.error('Auth error:', err);
+            socket.emit('authenticated', {
+                success: false,
+                message: 'Server error during authentication'
+            });
         }
     });
 
-    socket.on('baby_alert', async (alertData) => {
-        console.log('New alert:', alertData);
-        
-        // Store in Firebase
+    socket.on('baby_alert', async (data) => {
         if (db) {
             try {
-                await db.collection('alerts').add(alertData);
-                console.log('Alert stored in Firebase');
+                await db.collection('alerts').add(data);
             } catch (err) {
-                console.error('Error storing alert:', err);
+                console.error('Save alert error:', err);
             }
         }
-        
-        // Broadcast to all clients (Mother Dashboard)
-        socket.broadcast.emit('new_alert', alertData);
+        socket.broadcast.emit('new_alert', data);
     });
 
-    socket.on('expression_alert', async (expressionData) => {
-        console.log('New expression:', expressionData);
-        
-        // Broadcast to all clients
-        socket.broadcast.emit('new_expression', expressionData);
-        
-        // Optional: Update the last alert in Firebase with this reason
+    socket.on('expression_alert', async (data) => {
+        socket.broadcast.emit('new_expression', data);
+
         if (db) {
             try {
                 const snapshot = await db.collection('alerts')
@@ -146,16 +130,15 @@ io.on('connection', (socket) => {
                     .orderBy('timestamp', 'desc')
                     .limit(1)
                     .get();
-                
+
                 if (!snapshot.empty) {
                     const docId = snapshot.docs[0].id;
                     await db.collection('alerts').doc(docId).update({
-                        subType: expressionData.reason
+                        subType: data.reason
                     });
-                    console.log('Expression reason updated in Firebase');
                 }
             } catch (err) {
-                console.error('Error updating expression in Firebase:', err);
+                console.error('Expression update error:', err);
             }
         }
     });
@@ -165,16 +148,16 @@ io.on('connection', (socket) => {
     });
 
     socket.on('delete_history', async () => {
-        console.log('Deleting history...');
         if (db) {
             try {
                 const snapshot = await db.collection('alerts').get();
                 const batch = db.batch();
+
                 snapshot.forEach(doc => batch.delete(doc.ref));
                 await batch.commit();
-                console.log('History purged in Firebase');
+
             } catch (err) {
-                console.error('Error deleting history:', err);
+                console.error('Delete error:', err);
             }
         }
         io.emit('history_deleted');
@@ -185,6 +168,7 @@ io.on('connection', (socket) => {
     });
 });
 
+// --- Start Server --- //
 server.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });
