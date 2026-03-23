@@ -19,13 +19,29 @@ const serviceAccountPath = './firebase-service-account.json';
 
 try {
     if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-        console.log('Using FIREBASE_SERVICE_ACCOUNT environment variable');
-        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-        admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount)
-        });
-        db = admin.firestore();
-        console.log('Firebase initialized (Env Var)');
+        console.log('Detected FIREBASE_SERVICE_ACCOUNT environment variable.');
+        try {
+            const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+            
+            // Robustly handle escaped newlines in private key
+            if (serviceAccount.private_key && typeof serviceAccount.private_key === 'string') {
+                serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+            }
+
+            console.log('JSON parsing of FIREBASE_SERVICE_ACCOUNT successful.');
+            console.log('Project ID from Env Var:', serviceAccount.project_id);
+            console.log('Client Email from Env Var:', serviceAccount.client_email);
+            
+            admin.initializeApp({
+                credential: admin.credential.cert(serviceAccount)
+            });
+            db = admin.firestore();
+            console.log('Firebase initialized (Env Var)');
+        } catch (jsonError) {
+            console.error('JSON parsing error for FIREBASE_SERVICE_ACCOUNT:', jsonError.message);
+            console.log('Raw Env Var length:', process.env.FIREBASE_SERVICE_ACCOUNT.length);
+            console.log('First 50 chars of Env Var:', process.env.FIREBASE_SERVICE_ACCOUNT.substring(0, 50));
+        }
     } else if (fs.existsSync(serviceAccountPath)) {
         console.log('Using firebase-service-account.json');
         const serviceAccount = require(serviceAccountPath);
@@ -38,7 +54,7 @@ try {
         console.warn('WARNING: No Firebase credentials found. Database features will be disabled.');
     }
 } catch (error) {
-    console.error('Firebase initialization error:', error);
+    console.error('General Firebase initialization error:', error);
 }
 
 // --- Middleware --- //
