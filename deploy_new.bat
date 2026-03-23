@@ -1,0 +1,13 @@
+@echo off
+set GIT_PATH=C:\flutter\bin\mingit\cmd\git.exe
+echo [1/4] Aborting any active rebase...
+"%GIT_PATH%" rebase --abort
+echo [2/4] Switching to main branch...
+"%GIT_PATH%" branch -M main
+echo [3/4] Adding files...
+"%GIT_PATH%" add .
+"%GIT_PATH%" commit -m "Deploy full Node.js project"
+echo [4/4] Pushing to main branch...
+"%GIT_PATH%" push -u origin main --force
+echo Done! Please go back to Render and click Manual Deploy.
+pause

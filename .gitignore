@@ -1,13 +1,13 @@
 # Dependencies
 node_modules/
-package-lock.json
 
 # Local Environment
 .env
 .DS_Store
 
 # Backend & Database
-server.js
+# server.js (Now tracked for deployment)
+# package-lock.json (Now tracked for deployment)
 firebase-service-account.json
 firebase-service-account.json.json
 
