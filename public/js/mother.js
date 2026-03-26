@@ -117,11 +117,34 @@ socket.on('new_expression', (expressionData) => {
 });
 
 
+let lastFrameTime = Date.now();
+const feedStatus = document.createElement('div');
+feedStatus.id = 'feed-connectivity-status';
+feedStatus.className = 'badge bg-orange hidden';
+feedStatus.style.marginTop = '10px';
+feedStatus.textContent = 'Disconnected';
+const videoHeader = document.querySelector('.feed-card .card-header');
+if (videoHeader) videoHeader.appendChild(feedStatus);
+
 socket.on('video_frame', (frame) => {
     if (liveFeed) {
         liveFeed.src = frame;
+        lastFrameTime = Date.now();
+        if (!feedStatus.classList.contains('hidden')) {
+            feedStatus.classList.add('hidden');
+        }
     }
 });
+
+// Watchdog to check for disconnected "long distance" feed
+setInterval(() => {
+    const now = Date.now();
+    if (now - lastFrameTime > 5000) { // No frames for 5 seconds
+        feedStatus.textContent = 'Baby Monitor Offline/Lagging';
+        feedStatus.classList.remove('hidden');
+        feedStatus.classList.replace('bg-green', 'bg-orange');
+    }
+}, 2000);
 
 // UI Event Listeners
 dismissAlertBtn.addEventListener('click', () => {

@@ -21,7 +21,7 @@ const cryTypeEl = document.getElementById('cry-type');
 // Configuration
 const MOTION_THRESHOLD = 30; // Lowered to be more sensitive to motion
 const MOTION_PIXEL_COUNT_THRESHOLD = 2000; // Lowered to require fewer changed pixels
-const AUDIO_THRESHOLD = 0.15; // Volume threshold for fallback detection
+const AUDIO_THRESHOLD = 0.08; // Lowered from 0.15 for higher sensitivity
 const COOLDOWN_MS = 2000; // 2 seconds between same-type alerts to make it lively
 
 let lastMotionAlertTime = 0;
@@ -124,10 +124,26 @@ async function startMonitoring() {
         video.play().catch(e => console.error("Error playing video:", e));
     };
 
-    // Wait for video metadata to load for accurate sizes
+    // Wait for video metadata to load for accurate sizes and cap for "long distance" performance
     video.addEventListener('loadedmetadata', () => {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
+        // Cap resolution to 480p equivalent for stable transmission over long distances
+        const maxWidth = 640;
+        const maxHeight = 480;
+        let targetWidth = video.videoWidth;
+        let targetHeight = video.videoHeight;
+
+        if (targetWidth > maxWidth) {
+            targetHeight = Math.floor(targetHeight * (maxWidth / targetWidth));
+            targetWidth = maxWidth;
+        }
+        if (targetHeight > maxHeight) {
+            targetWidth = Math.floor(targetWidth * (maxHeight / targetHeight));
+            targetHeight = maxHeight;
+        }
+
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+        console.log(`Canvas resolution capped at: ${canvas.width}x${canvas.height}`);
     });
 
     video.addEventListener('play', () => {
@@ -208,7 +224,9 @@ function detectMotion() {
     previousFrame = new Uint8ClampedArray(data);
 
     // Broadcast video frame over Socket.IO
-    socket.emit('video_frame', canvas.toDataURL('image/jpeg', 0.4));
+    // "Long distance" optimization: use lower quality (0.3) for stability
+    const frameData = canvas.toDataURL('image/jpeg', 0.3); 
+    socket.emit('video_frame', frameData);
 
     // Throttle next frame to ~5-10 FPS for bandwidth and allow running in background
     setTimeout(() => {
@@ -271,8 +289,8 @@ async function startAudioDetection(stream) {
 
             // Check current volume and frequency distribution
             analyser.getByteFrequencyData(dataArray);
-            let speechEnergy = 0; // 100Hz - 400Hz
-            let cryEnergy = 0;    // 600Hz - 2000Hz
+            let noiseEnergy = 0; // 50Hz - 400Hz (Fans, Motors, Background Hum)
+            let cryEnergy = 0;   // 800Hz - 3000Hz (Standard Baby Cry Harmonics)
             let peakVol = 0;
             let sum = 0;
 
@@ -281,12 +299,12 @@ async function startAudioDetection(stream) {
                 const val = dataArray[i];
                 sum += val;
                 if (val > peakVol) peakVol = val;
-                if (freq >= 100 && freq <= 400) speechEnergy += val;
-                else if (freq >= 600 && freq <= 2000) cryEnergy += val;
+                if (freq >= 50 && freq <= 400) noiseEnergy += val;
+                else if (freq >= 800 && freq <= 3000) cryEnergy += val;
             }
             
             const avgVol = sum / dataArray.length;
-            const cryRatio = speechEnergy > 0 ? (cryEnergy / speechEnergy).toFixed(1) : "0";
+            const cryRatio = noiseEnergy > 0 ? (cryEnergy / noiseEnergy).toFixed(1) : "0";
 
             let maxScore = 0;
             let maxClass = "";
@@ -310,10 +328,10 @@ async function startAudioDetection(stream) {
 
             // Handle as 'Baby Cry' with Advanced Filtering:
             // 1. Must be a cry class
-            // 2. High confidence (> 0.95 - set in recognizer options)
-            // 3. Significant Peak (peakVol > 150)
-            // 4. Frequency Check: Cry Energy must be significantly higher than Speech Energy (ratio > 1.6)
-            if (cryClasses.includes(detectedClass) && maxScore > 0.95 && peakVol > 150 && parseFloat(cryRatio) > 1.6) {
+            // 2. High confidence (> 0.80 - raised to prevent noise false positives)
+            // 3. Significant Peak (peakVol > 100)
+            // 4. Frequency Check: Cry Energy must be notably higher than Noise Energy (ratio > 1.6)
+            if (cryClasses.includes(detectedClass) && maxScore > 0.80 && peakVol > 100 && parseFloat(cryRatio) > 1.6) {
                 // Determine if it was a cry or just noise
                 const isActualCry = (detectedClass === 'hungry' || detectedClass === 'pain' || detectedClass === 'sleepy' || detectedClass === 'cry' || detectedClass === 'baby cry');
 
@@ -331,7 +349,7 @@ async function startAudioDetection(stream) {
             }
         }, {
             includeSpectrogram: false,
-            probabilityThreshold: 0.95, // Increased threshold for maximum confidence
+            probabilityThreshold: 0.80, // Raised threshold to be more selective
             invokeCallbackOnNoiseAndUnknown: true,
             overlapFactor: 0.50 // How often to sample (0.50 is half a second)
         });
@@ -360,10 +378,10 @@ function startFallbackAudioDetection(stream) {
         analyser.getByteFrequencyData(dataArray);
 
         let peakCry = 0;
+        let noiseEnergy = 0;
         let cryEnergy = 0;
-        let speechEnergy = 0;
+        let noiseBins = 0;
         let cryBins = 0;
-        let speechBins = 0;
 
         for (let i = 0; i < bufferLength; i++) {
             const freq = i * binSize;
@@ -371,23 +389,23 @@ function startFallbackAudioDetection(stream) {
             
             if (value > peakCry) peakCry = value; // Track the peak volume
 
-            if (freq >= 85 && freq <= 350) {
-                speechEnergy += value;
-                speechBins++;
-            } else if (freq >= 500 && freq <= 2000) {
+            if (freq >= 50 && freq <= 350) {
+                noiseEnergy += value;
+                noiseBins++;
+            } else if (freq >= 800 && freq <= 2500) {
                 cryEnergy += value;
                 cryBins++;
             }
         }
 
-        const avgSpeech = speechBins > 0 ? speechEnergy / speechBins : 0;
+        const avgNoise = noiseBins > 0 ? noiseEnergy / noiseBins : 0;
         const avgCry = cryBins > 0 ? cryEnergy / cryBins : 0;
 
         // Use Peak for much stricter suppression of noise
-        const minimumPeakValue = 200;
+        const minimumPeakValue = 120; // Increased from 100 to avoid static
 
         // Simply trigger for a baby cry (no sub-types anymore!)
-        if (peakCry > minimumPeakValue && avgCry > avgSpeech * 1.5) {
+        if (peakCry > minimumPeakValue && avgCry > avgNoise * 1.6) {
             handleEvent('Baby Cry', 'Cry Detected');
             showIndicator(audioIndicator);
             if (cryTypeEl) {

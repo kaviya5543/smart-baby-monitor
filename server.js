@@ -124,6 +124,23 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('delete_history', async () => {
+        console.log('Received delete_history request from:', socket.id);
+        if (db) {
+            try {
+                const snapshot = await db.collection('alerts').get();
+                const batch = db.batch();
+                snapshot.docs.forEach(doc => batch.delete(doc.ref));
+                await batch.commit();
+                console.log(`Deleted ${snapshot.size} alert(s) from Firestore.`);
+            } catch (err) {
+                console.error('Error deleting alerts from Firestore:', err);
+            }
+        }
+        // Broadcast to ALL clients (including the sender) so everyone's UI clears
+        io.emit('history_deleted');
+    });
+
     socket.on('baby_alert', async (data) => {
         console.log('Alert:', data);
 
@@ -139,6 +156,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('video_frame', (frame) => {
+        // Broadcast to all other clients
         socket.broadcast.emit('video_frame', frame);
     });
 
@@ -149,6 +167,13 @@ io.on('connection', (socket) => {
 
 // ✅ FIX: Bind to 0.0.0.0
 server.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`Open: http://localhost:${PORT}`);
+    console.log(`\n🚀 Server is running!`);
+    console.log(`   - Port: ${PORT}`);
+    console.log(`   - Network: Listening on 0.0.0.0`);
+    if (process.env.RENDER_EXTERNAL_URL) {
+        console.log(`   - Live URL: ${process.env.RENDER_EXTERNAL_URL}`);
+    } else {
+        console.log(`   - Local: http://localhost:${PORT}`);
+    }
+    console.log('----------------------------\n');
 });
