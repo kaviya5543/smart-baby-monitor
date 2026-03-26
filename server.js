@@ -288,7 +288,7 @@ setInterval(async () => {
     }
 }, CLEANUP_INTERVAL);
 
-let currentPort = process.env.PORT || 3005;
+let currentPort = process.env.PORT || 3000;
 
 function startServer(port) {
     server.listen(port, () => {
