@@ -3,177 +3,308 @@ const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const admin = require('firebase-admin');
-const fs = require('fs');
+
+// Initialize Firebase Admin
+let db;
+try {
+    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+        // Production: Use environment variable
+        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount)
+        });
+        console.log('Firebase Admin initialized via environment variable.');
+    } else {
+        // Local: Use service account file
+        const fs = require('fs');
+        let serviceAccountPath;
+        
+        // Check for both common misnamings or the correct one
+        if (fs.existsSync(path.join(__dirname, 'firebase-service-account.json.json'))) {
+            serviceAccountPath = './firebase-service-account.json.json';
+        } else if (fs.existsSync(path.join(__dirname, 'firebase-service-account.json'))) {
+            serviceAccountPath = './firebase-service-account.json';
+        }
+
+        if (serviceAccountPath) {
+            const serviceAccount = require(serviceAccountPath);
+            admin.initializeApp({
+                credential: admin.credential.cert(serviceAccount)
+            });
+            console.log(`Firebase Admin initialized via local file: ${serviceAccountPath}`);
+        } else {
+            const isProduction = process.env.NODE_ENV === 'production';
+            if (isProduction) {
+                console.error('CRITICAL: FIREBASE_SERVICE_ACCOUNT environment variable is missing in production!');
+            } else {
+                console.error('CRITICAL: Firebase service account file not found locally (expected firebase-service-account.json).');
+            }
+            throw new Error('Missing Firebase credentials');
+        }
+    }
+    db = admin.firestore();
+} catch (error) {
+    console.error('CRITICAL: Firebase initialization failed:', error.message);
+    db = null;
+}
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-const PORT = process.env.PORT || 3000;
-
-let db;
-
-// --- Firebase Initialization --- //
-try {
-    let serviceAccount;
-
-    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-        console.log('Firebase: Using credentials from ENV');
-        serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    } 
-    else if (fs.existsSync('./firebase-service-account.json')) {
-        console.log('Firebase: Using local file (firebase-service-account.json)');
-        serviceAccount = require('./firebase-service-account.json');
-    }
-
-    if (serviceAccount) {
-        if (typeof serviceAccount.private_key === 'string') {
-            serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
-        }
-
-        console.log(`Firebase: Initializing for project "${serviceAccount.project_id}"...`);
-
-        admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount)
-        });
-
-        db = admin.firestore();
-
-        db.collection('config').doc('health_check').set({
-            last_start: new Date().toISOString()
-        })
-        .then(() => console.log('Firebase: Health check SUCCESS'))
-        .catch(err => console.error('Firebase error:', err.message));
-    } 
-    else {
-        console.warn('WARNING: No Firebase credentials found.');
-    }
-} catch (error) {
-    console.error('Firebase init error:', error.message);
-}
-
-// --- Middleware --- //
+// Serve static files from the public directory
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ✅ Explicit root route (FIX)
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
+let currentAccessCode = process.env.ACCESS_CODE || '1234';
+let babySocketId = null;
 
-// --- Socket.IO Logic --- //
-io.on('connection', (socket) => {
-    console.log('User connected:', socket.id);
+// Helper to update access code in Firestore
+async function updateStoredAccessCode(newCode) {
+    if (!db) return;
+    try {
+        await db.collection('settings').doc('access_code').set({
+            code: newCode,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        console.log(`Access code updated in Firestore: ${newCode}`);
+    } catch (err) {
+        console.error('Error updating access code in Firestore:', err.message);
+    }
+}
 
-    socket.on('authenticate', async (inputCode) => {
-        const code = inputCode ? inputCode.toString().trim() : '';
-        console.log(`Auth attempt: "${code}"`);
+// Load initial access code from Firestore
+async function loadAccessCode() {
+    if (!db) return;
+    try {
+        const doc = await db.collection('settings').doc('access_code').get();
+        if (doc.exists) {
+            currentAccessCode = doc.data().code;
+            console.log(`Access code loaded from Firestore: ${currentAccessCode}`);
+        }
+    } catch (err) {
+        console.error('Error loading access code from Firestore:', err.message);
+    }
+}
 
+loadAccessCode();
+
+io.on('connection', async (socket) => {
+    console.log('A user connected:', socket.id);
+    socket.authenticated = false;
+    socket.role = null;
+
+    // Authentication event
+    socket.on('authenticate', (code) => {
+        if (code === currentAccessCode) {
+            socket.authenticated = true;
+            socket.emit('authenticated', { success: true });
+            console.log(`Socket ${socket.id} authenticated successfully.`);
+            
+            // Send initial data after authentication
+            sendInitialData(socket);
+        } else {
+            socket.emit('authenticated', { success: false, message: 'Invalid access code.' });
+            console.log(`Socket ${socket.id} failed authentication.`);
+        }
+    });
+
+    // Register as Baby Monitor
+    socket.on('register_as_baby', () => {
+        if (!socket.authenticated) return;
+
+        if (babySocketId && babySocketId !== socket.id) {
+            console.log(`Registration REJECTED for ${socket.id}. Baby already connected: ${babySocketId}`);
+            socket.emit('registration_failed', { message: 'Another user is already monitoring.' });
+        } else {
+            babySocketId = socket.id;
+            socket.role = 'baby';
+            console.log(`Socket ${socket.id} registered as BABY MONITOR.`);
+            socket.emit('registration_success');
+            // Notify others that a monitor is online
+            io.emit('baby_status', { online: true });
+        }
+    });
+
+    // Update Access Code
+    socket.on('update_access_code', async (newCode) => {
+        if (!socket.authenticated) return;
+        
+        console.log(`Updating access code to: ${newCode}`);
+        currentAccessCode = newCode;
+        await updateStoredAccessCode(newCode);
+        
+        // Broadcast to everyone that the code has changed (they might need to re-login if they refresh)
+        io.emit('access_code_updated', { message: 'Access code has been changed by a parent.' });
+    });
+
+    // Receive audio chunk and broadcast
+    socket.on('audio_chunk', (chunk) => {
+        if (!socket.authenticated || socket.role !== 'baby') return;
+        socket.broadcast.emit('audio_chunk', chunk);
+    });
+
+    async function sendInitialData(socket) {
+        if (!socket.authenticated) return; // Ensure authenticated before sending data
+        
+        // Send existing alerts from the last 24 hours to the newly connected mother dashboard
+        const now = Date.now();
+        const oneDayAgo = now - 86400000;
+
+        try {
+            const snapshot = await db.collection('alerts')
+                .where('timestamp', '>=', oneDayAgo)
+                .orderBy('timestamp', 'desc')
+                .get();
+            
+            const alerts = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            socket.emit('initial_alerts', alerts);
+        } catch (err) {
+            console.error('Error fetching alerts:', err.message);
+        }
+    }
+
+    // Receive an alert from the baby monitor (Requires Auth)
+    socket.on('baby_alert', async (alertData) => {
+        if (!socket.authenticated) {
+            console.warn(`REJECTED: Unauthenticated baby_alert from socket ${socket.id}`);
+            return;
+        }
+        console.log('Received alert:', alertData);
+        try {
+            // Add to our database
+            const docRef = await db.collection('alerts').add({
+                type: alertData.type,
+                date: alertData.date,
+                time: alertData.time,
+                timestamp: alertData.timestamp
+            });
+            alertData.id = docRef.id;
+            // Broadcast to all connected mother dashboards
+            socket.broadcast.emit('new_alert', alertData);
+        } catch (err) {
+            console.error('Error inserting alert:', err.message);
+        }
+    });
+
+    // Receive an expression alert from the baby monitor and broadcast it (Requires Auth)
+    socket.on('expression_alert', (expressionData) => {
+        if (!socket.authenticated) {
+            console.warn(`REJECTED: Unauthenticated expression_alert from socket ${socket.id}`);
+            return;
+        }
+        console.log('Received expression alert:', expressionData);
+        socket.broadcast.emit('new_expression', expressionData);
+    });
+
+    // Receive a video frame and broadcast it (Requires Auth)
+    socket.on('video_frame', (frame) => {
+        if (!socket.authenticated) {
+            // Don't log every frame rejection to avoid spam, just once per socket if needed
+            return;
+        }
+        socket.broadcast.emit('video_frame', frame);
+    });
+
+    // Delete all alert history from Firestore (Requires Auth)
+    socket.on('delete_history', async () => {
+        if (!socket.authenticated) {
+            console.warn(`REJECTED: Unauthenticated delete_history from socket ${socket.id}`);
+            socket.emit('delete_status', { success: false, message: 'Not authenticated' });
+            return;
+        }
+        console.log(`--- DELETE HISTORY REQUEST [Socket: ${socket.id}] ---`);
+        
         if (!db) {
-            if (code === '7557') {
-                return socket.emit('authenticated', { success: true });
-            } else {
-                return socket.emit('authenticated', {
-                    success: false,
-                    message: 'Use default code 7557'
-                });
-            }
+            console.error('ERROR: Cannot delete. Firestore is NOT initialized (db is null).');
+            socket.emit('delete_status', { success: false, message: 'Database not initialized' });
+            return;
         }
 
         try {
-            const doc = await db.collection('config').doc('auth').get();
+            console.log('Fetching all documents from "alerts" collection...');
+            const snapshot = await db.collection('alerts').get();
+            console.log(`Query complete. Found ${snapshot.size} alerts in Firestore.`);
 
-            if (!doc.exists) {
-                await db.collection('config').doc('auth').set({ accessCode: code });
-                return socket.emit('authenticated', { success: true });
-            }
+            if (snapshot.size > 0) {
+                // Delete in chunks of 500 (Firestore limit)
+                const chunks = [];
+                for (let i = 0; i < snapshot.docs.length; i += 500) {
+                    chunks.push(snapshot.docs.slice(i, i + 500));
+                }
 
-            const storedCode = doc.data().accessCode?.toString().trim();
-
-            if (code === '0000') {
-                await db.collection('config').doc('auth').set({ accessCode: '7557' });
-                return socket.emit('authenticated', {
-                    success: false,
-                    message: 'Reset to 7557. Login again.'
-                });
-            }
-
-            if (code === storedCode) {
-                socket.emit('authenticated', { success: true });
-
-                const snapshot = await db.collection('alerts')
-                    .orderBy('timestamp', 'desc')
-                    .limit(50)
-                    .get();
-
-                const alerts = snapshot.docs.map(doc => doc.data());
-                socket.emit('initial_alerts', alerts);
-
+                console.log(`Planning deletion in ${chunks.length} batches...`);
+                for (let i = 0; i < chunks.length; i++) {
+                    const batch = db.batch();
+                    chunks[i].forEach(doc => batch.delete(doc.ref));
+                    await batch.commit();
+                    console.log(`Batch ${i+1}/${chunks.length} committed (${chunks[i].length} docs).`);
+                }
+                console.log(`SUCCESS: Deleted ${snapshot.size} alerts total.`);
             } else {
-                socket.emit('authenticated', {
-                    success: false,
-                    message: 'Invalid Access Code'
-                });
+                console.log('INFO: Firestore already empty.');
             }
-
+            // Broadcast to EVERYONE (including the sender)
+            console.log('Broadcasting history_deleted to all clients...');
+            io.emit('history_deleted');
+            socket.emit('delete_status', { success: true });
         } catch (err) {
-            console.error('Auth error:', err);
-            socket.emit('authenticated', {
-                success: false,
-                message: 'Server error'
-            });
+            console.error('ERROR during deletion operation:', err.message);
+            socket.emit('delete_status', { success: false, message: err.message });
         }
-    });
-
-    socket.on('delete_history', async () => {
-        console.log('Received delete_history request from:', socket.id);
-        if (db) {
-            try {
-                const snapshot = await db.collection('alerts').get();
-                const batch = db.batch();
-                snapshot.docs.forEach(doc => batch.delete(doc.ref));
-                await batch.commit();
-                console.log(`Deleted ${snapshot.size} alert(s) from Firestore.`);
-            } catch (err) {
-                console.error('Error deleting alerts from Firestore:', err);
-            }
-        }
-        // Broadcast to ALL clients (including the sender) so everyone's UI clears
-        io.emit('history_deleted');
-    });
-
-    socket.on('baby_alert', async (data) => {
-        console.log('Alert:', data);
-
-        if (db) {
-            try {
-                await db.collection('alerts').add(data);
-            } catch (err) {
-                console.error(err);
-            }
-        }
-
-        socket.broadcast.emit('new_alert', data);
-    });
-
-    socket.on('video_frame', (frame) => {
-        // Broadcast to all other clients
-        socket.broadcast.emit('video_frame', frame);
     });
 
     socket.on('disconnect', () => {
         console.log('User disconnected:', socket.id);
+        if (socket.id === babySocketId) {
+            console.log('BABY MONITOR disconnected.');
+            babySocketId = null;
+            io.emit('baby_status', { online: false });
+        }
     });
 });
 
-// ✅ FIX: Bind to 0.0.0.0
-server.listen(PORT, "0.0.0.0", () => {
-    console.log(`\n🚀 Server is running!`);
-    console.log(`   - Port: ${PORT}`);
-    console.log(`   - Network: Listening on 0.0.0.0`);
-    if (process.env.RENDER_EXTERNAL_URL) {
-        console.log(`   - Live URL: ${process.env.RENDER_EXTERNAL_URL}`);
-    } else {
-        console.log(`   - Local: http://localhost:${PORT}`);
+// Clean up alerts older than 24 hours (86400000 ms) in the database
+const CLEANUP_INTERVAL = 60 * 60 * 1000; // run every hour
+setInterval(async () => {
+    const oneDayAgo = Date.now() - 86400000;
+    try {
+        const snapshot = await db.collection('alerts')
+            .where('timestamp', '<', oneDayAgo)
+            .get();
+        
+        if (snapshot.size > 0) {
+            const batch = db.batch();
+            snapshot.docs.forEach((doc) => {
+                batch.delete(doc.ref);
+            });
+            await batch.commit();
+            console.log(`Cleaned up ${snapshot.size} old alerts`);
+        }
+    } catch (err) {
+        console.error('Error deleting old alerts:', err.message);
     }
-    console.log('----------------------------\n');
-});
+}, CLEANUP_INTERVAL);
+
+let currentPort = process.env.PORT || 3005;
+
+function startServer(port) {
+    server.listen(port, () => {
+        console.log(`\n================================================`);
+        console.log(`  BABY MONITOR SERVER STARTED ON PORT: ${port}`);
+        console.log(`  Access Monitor: http://localhost:${port}/baby.html`);
+        console.log(`  Access Dashboard: http://localhost:${port}/mother.html`);
+        console.log(`================================================\n`);
+    }).on('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+            console.log(`Port ${port} is busy, trying ${port + 1}...`);
+            startServer(port + 1);
+        } else {
+            console.error('Server error:', err);
+        }
+    });
+}
+
+startServer(currentPort);

@@ -1,5 +1,76 @@
 const socket = io();
 
+const pinOverlay = document.getElementById('pin-overlay');
+const pinInput = document.getElementById('pin-input');
+const pinSubmit = document.getElementById('pin-submit');
+const pinError = document.getElementById('pin-error');
+const changeCodeBtn = document.getElementById('change-code-btn');
+const statusBadge = document.getElementById('status-badge');
+
+let authenticated = false;
+
+// Authenticate with the server
+pinSubmit.addEventListener('click', () => {
+    const code = pinInput.value;
+    if (code.length === 4) {
+        socket.emit('authenticate', code);
+    } else {
+        showPinError("Please enter a 4-digit code.");
+    }
+});
+
+pinInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') pinSubmit.click();
+});
+
+function showPinError(msg) {
+    pinError.textContent = msg;
+    pinError.classList.remove('hidden');
+    setTimeout(() => pinError.classList.add('hidden'), 3000);
+}
+
+socket.on('authenticated', (data) => {
+    if (data.success) {
+        console.log("Successfully authenticated with server.");
+        authenticated = true;
+        pinOverlay.classList.add('hidden');
+        if (statusBadge) {
+            statusBadge.classList.replace('bg-orange', 'bg-green');
+            statusBadge.innerHTML = '<span class="pulse-dot"></span> System Active';
+        }
+    } else {
+        console.error("Authentication failed:", data.message);
+        showPinError(data.message || "Invalid access code.");
+    }
+});
+
+socket.on('baby_status', (data) => {
+    console.log("Baby status changed:", data);
+    const badge = document.getElementById('status-badge');
+    if (data.online) {
+        badge.classList.remove('bg-red', 'bg-orange');
+        badge.classList.add('bg-green');
+        badge.innerHTML = '<span class="pulse-dot"></span> Baby Monitor Online';
+    } else {
+        badge.classList.remove('bg-green', 'bg-orange');
+        badge.classList.add('bg-red');
+        badge.innerHTML = 'Baby Monitor Offline';
+    }
+});
+
+socket.on('access_code_updated', (data) => {
+    alert(data.message + "\nYou will need to use the new PIN next time.");
+});
+
+changeCodeBtn.addEventListener('click', () => {
+    const newCode = prompt("Enter new 4-digit Parent PIN:");
+    if (newCode && newCode.length === 4 && /^\d+$/.test(newCode)) {
+        socket.emit('update_access_code', newCode);
+    } else if (newCode) {
+        alert("Invalid PIN. Must be 4 digits.");
+    }
+});
+
 // UI Elements
 
 const alertsBody = document.getElementById('alerts-body');
@@ -11,53 +82,11 @@ const liveFeed = document.getElementById('live-feed');
 const latestAlert = document.getElementById('latest-alert');
 const alertTitle = document.getElementById('alert-title');
 const alertMessage = document.getElementById('alert-message');
+const expressionMessage = document.getElementById('expression-message');
 const dismissAlertBtn = document.getElementById('dismiss-alert');
 const deleteHistoryBtn = document.getElementById('delete-history-btn');
-const logoutBtn = document.getElementById('logout-btn');
-const loginOverlay = document.getElementById('login-overlay');
-const accessCodeInput = document.getElementById('access-code');
-const loginBtn = document.getElementById('login-btn');
-const loginError = document.getElementById('login-error');
-const dashboardContent = document.getElementById('dashboard-content');
-const expressionStatus = document.getElementById('expression-status');
-const expressionMessage = document.getElementById('expression-message');
 
 let alertsHistory = [];
-
-// Authentication Logic
-document.addEventListener('DOMContentLoaded', () => {
-    const savedCode = localStorage.getItem('baby_monitor_code');
-    if (savedCode) {
-        authenticate(savedCode);
-    }
-});
-
-loginBtn.addEventListener('click', () => {
-    const code = accessCodeInput.value;
-    authenticate(code);
-});
-
-logoutBtn.addEventListener('click', () => {
-    localStorage.removeItem('baby_monitor_code');
-    location.reload();
-});
-
-function authenticate(code) {
-    socket.emit('authenticate', code);
-}
-
-socket.on('authenticated', (response) => {
-    if (response.success) {
-        const code = accessCodeInput.value || localStorage.getItem('baby_monitor_code');
-        localStorage.setItem('baby_monitor_code', code);
-        loginOverlay.classList.add('hidden');
-        if (dashboardContent) dashboardContent.classList.remove('hidden');
-    } else {
-        localStorage.removeItem('baby_monitor_code');
-        loginError.classList.remove('hidden');
-        loginError.textContent = response.message || 'Invalid Access Code';
-    }
-});
 
 // Socket connections
 socket.on('initial_alerts', (alerts) => {
@@ -69,6 +98,14 @@ socket.on('history_deleted', () => {
     console.log('Event received: history_deleted');
     alertsHistory = [];
     renderTable();
+});
+
+socket.on('delete_status', (data) => {
+    if (data.success) {
+        alert('Alert history cleared successfully.');
+    } else {
+        alert('Failed to clear history: ' + (data.message || 'Unknown error'));
+    }
 });
 
 socket.on('new_alert', (alertData) => {
@@ -85,66 +122,73 @@ socket.on('new_alert', (alertData) => {
 });
 
 socket.on('new_expression', (expressionData) => {
-    console.log('Received expression:', expressionData);
-    
-    // 1. Update the live feed overlay status
-    if (expressionStatus) {
-        expressionStatus.textContent = expressionData.reason;
-        expressionStatus.classList.remove('hidden');
-        setTimeout(() => expressionStatus.classList.add('hidden'), 5000);
-    }
-    
-    // 2. Update the banner message
+    console.log('New expression received:', expressionData);
     if (expressionMessage) {
-        expressionMessage.textContent = `Reason: ${expressionData.reason}`;
+        expressionMessage.textContent = `Facial Expression: ${expressionData.reason}`;
         expressionMessage.classList.remove('hidden');
-    }
-
-    // 3. Integrate into the main Alert Title (e.g., Baby Cry (Hungry)!)
-    if (latestAlert.classList.contains('show') && alertTitle.textContent.includes('Baby Cry')) {
-        alertTitle.textContent = `Baby Cry (${expressionData.reason})!`;
-    }
-
-    // 4. Update History Table
-    // Find the most recent 'Baby Cry' alert to attach this reason to
-    for (let i = alertsHistory.length - 1; i >= 0; i--) {
-        if (alertsHistory[i].type === 'Baby Cry') {
-            alertsHistory[i].subType = expressionData.reason;
-            break;
+        
+        // Find the latest cry alert in history and attach this info if it's very recent
+        const now = Date.now();
+        const latestCryIndex = alertsHistory.findLastIndex(a => a.type === 'Baby Cry' && (now - a.timestamp < 10000));
+        if (latestCryIndex !== -1) {
+            alertsHistory[latestCryIndex].expressionReason = expressionData.reason;
+            renderTable();
         }
     }
-    renderTable();
 });
-
-
-let lastFrameTime = Date.now();
-const feedStatus = document.createElement('div');
-feedStatus.id = 'feed-connectivity-status';
-feedStatus.className = 'badge bg-orange hidden';
-feedStatus.style.marginTop = '10px';
-feedStatus.textContent = 'Disconnected';
-const videoHeader = document.querySelector('.feed-card .card-header');
-if (videoHeader) videoHeader.appendChild(feedStatus);
 
 socket.on('video_frame', (frame) => {
     if (liveFeed) {
         liveFeed.src = frame;
-        lastFrameTime = Date.now();
-        if (!feedStatus.classList.contains('hidden')) {
-            feedStatus.classList.add('hidden');
-        }
     }
 });
 
-// Watchdog to check for disconnected "long distance" feed
-setInterval(() => {
-    const now = Date.now();
-    if (now - lastFrameTime > 5000) { // No frames for 5 seconds
-        feedStatus.textContent = 'Baby Monitor Offline/Lagging';
-        feedStatus.classList.remove('hidden');
-        feedStatus.classList.replace('bg-green', 'bg-orange');
+// --- Live Audio Playback --- //
+let mediaSource = null;
+let sourceBuffer = null;
+let queue = [];
+const audioEl = new Audio();
+
+function initAudio() {
+    if (mediaSource) return;
+    
+    mediaSource = new MediaSource();
+    audioEl.src = URL.createObjectURL(mediaSource);
+    
+    mediaSource.addEventListener('sourceopen', () => {
+        console.log("MediaSource opened");
+        try {
+            sourceBuffer = mediaSource.addSourceBuffer('audio/webm;codecs=opus');
+            sourceBuffer.addEventListener('updateend', () => {
+                if (queue.length > 0 && !sourceBuffer.updating) {
+                    sourceBuffer.appendBuffer(queue.shift());
+                }
+            });
+        } catch (e) {
+            console.error("Error adding SourceBuffer:", e);
+        }
+    });
+
+    audioEl.play().catch(e => console.warn("Auto-play blocked, wait for interaction", e));
+}
+
+// Initialize audio on first user click to satisfy browser policy
+document.addEventListener('click', initAudio, { once: true });
+
+socket.on('audio_chunk', (chunk) => {
+    if (!authenticated) return;
+    
+    if (sourceBuffer && !sourceBuffer.updating) {
+        sourceBuffer.appendBuffer(chunk);
+    } else {
+        queue.push(chunk);
     }
-}, 2000);
+    
+    // Auto-play if paused
+    if (audioEl.paused && mediaSource.readyState === 'open') {
+        audioEl.play().catch(() => {});
+    }
+});
 
 // UI Event Listeners
 dismissAlertBtn.addEventListener('click', () => {
@@ -171,16 +215,14 @@ function playSound() {
 }
 
 function showBanner(alert) {
-    const displayTitle = (alert.type === 'Baby Cry' && alert.subType) ? `Baby Cry (${alert.subType})` : (alert.subType || alert.type);
-    alertTitle.textContent = `${displayTitle}!`;
-    let displayMsg = `${displayTitle} detected at ${alert.time} | ${alert.date}`;
+    alertTitle.textContent = `${alert.type} Detected!`;
+    let displayMsg = `${alert.type} detected at ${alert.time} | ${alert.date}`;
+    if (expressionMessage) expressionMessage.classList.add('hidden'); // Clear old expression info
+    if (alert.subType) {
+        displayMsg += `\nType: ${alert.subType}`;
+    }
     alertMessage.textContent = displayMsg;
     
-    // Hide previous expression if new alert is not a cry
-    if (alert.type !== 'Baby Cry' && expressionMessage) {
-        expressionMessage.classList.add('hidden');
-    }
-
     // Custom styling based on type
     if (alert.type === 'Baby Cry') {
         latestAlert.style.borderLeftColor = 'var(--alert-red)';
@@ -224,7 +266,14 @@ function renderTable(isNew = false) {
         }
 
         const typeClass = alert.type === 'Baby Cry' ? 'type-cry' : 'type-move';
-        let displayType = (alert.type === 'Baby Cry' && alert.subType) ? `Baby Cry (${alert.subType})` : (alert.subType || alert.type);
+        
+        let displayType = alert.type;
+        if (alert.subType) {
+            displayType += ` <br><small>Sound: ${alert.subType}</small>`;
+        }
+        if (alert.expressionReason) {
+            displayType += `<br><small>Face: ${alert.expressionReason}</small>`;
+        }
 
         tr.innerHTML = `
             <td class="${typeClass}">${displayType}</td>

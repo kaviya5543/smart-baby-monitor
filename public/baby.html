@@ -8,30 +8,51 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <script src="/socket.io/socket.io.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
-    <!-- AI Audio Detection Libraries -->
+    <!-- Teachable Machine Audio -->
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/speech-commands@0.4.0/dist/speech-commands.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/audio@1.3.1/dist/teachablemachine-audio.min.js"></script>
 </head>
 <body>
-    <!-- Login Overlay -->
-    <div id="login-overlay" class="login-overlay">
-        <div class="login-card">
-            <h2>Baby Monitor Access</h2>
-            <p>Please enter the security access code to start monitoring.</p>
-            <input type="password" id="access-code" placeholder="----" maxlength="4">
-            <button id="login-btn" class="login-btn">Unlock Monitor</button>
-            <p id="login-error" class="error-msg hidden">Invalid Access Code</p>
-        </div>
-    </div>
-    <div id="monitor-content" class="container fade-in hidden">
+
+
+    <!-- Monitor Content -->
+    <div id="monitor-content" class="container fade-in">
         <header class="page-header">
             <a href="index.html" class="btn outline-btn back-btn">&larr; Back Home</a>
             <h1>Baby Monitor</h1>
-            <div id="status-badge" class="badge bg-green">
-                <span class="pulse-dot"></span> Monitoring Baby...
+            <div class="header-right">
+                <div id="status-badge" class="badge bg-green">
+                    <span class="pulse-dot"></span> Monitoring Baby...
+                </div>
             </div>
-            <button id="logout-btn" class="logout-btn">Logout</button>
         </header>
+
+        <!-- PIN Entry Overlay -->
+        <div id="pin-overlay" class="overlay">
+            <div class="pin-box fade-in">
+                <div class="lock-icon">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                </div>
+                <h2>Secure Access</h2>
+                <p>Enter your parent PIN to access the baby monitor</p>
+                <input type="password" id="pin-input" maxlength="4" placeholder="••••">
+                <p id="pin-error" class="error-text hidden">Invalid access code</p>
+                <button id="pin-submit" class="btn primary-btn">Unlock Monitor</button>
+            </div>
+        </div>
+
+        <!-- Busy Overlay -->
+        <div id="busy-overlay" class="busy-overlay hidden">
+            <div class="busy-box fade-in">
+                <div class="lock-icon" style="color:var(--alert-red)">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                </div>
+                <h2>Monitor Busy</h2>
+                <p id="busy-message">Another device is currently monitoring the baby. Only one monitor can be active at a time.</p>
+                <button onclick="window.location.reload()" class="btn outline-btn">Try Again</button>
+                <a href="index.html" class="btn text-btn">Return Home</a>
+            </div>
+        </div>
 
         <main class="monitor-main">
             <div class="video-container">
@@ -55,15 +76,6 @@
                         <span class="label">Mic Stream:</span>
                         <span id="mic-status" class="value success">Initializing...</span>
                     </div>
-                    <div id="expression-result" class="status-item">
-                        <span class="label">Expression:</span>
-                        <span id="expression-status" class="value success">Ready</span>
-                    </div>
-                </div>
-
-                <div id="camera-error" class="error-box hidden mt-1">
-                    <p id="camera-error-msg"></p>
-                    <button id="retry-cam-btn" class="btn primary-btn mt-1">Retry Camera Access</button>
                 </div>
 
                 <div class="cry-analyzer-card mt-2">
@@ -78,13 +90,20 @@
                     </div>
                     
                     <div id="cry-result" class="cry-result mt-1">
-                        <span class="label">Cry Status:</span>
+                        <span class="label">Sound Reason:</span>
                         <span id="cry-type" class="value">Analyzing...</span>
                     </div>
-                    <div class="cry-result mt-1">
-                        <span class="label">Cry Reason:</span>
-                        <span id="expression-type" class="value">Monitoring...</span>
+                <div class="card settings-card mt-2">
+                    <div class="analyzer-header">
+                        <div class="analyzer-icon-pink" style="background:var(--primary-color); color:white;">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                        </div>
+                        <h4>Parent Controls</h4>
                     </div>
+                    <p style="font-size: 0.875rem; color: var(--text-muted); margin-bottom: 1rem;">Update the security PIN used to access the monitor.</p>
+                    <button id="change-code-btn" class="btn primary-btn w-100" style="width: 100%;">
+                        Update Security PIN
+                    </button>
                 </div>
             </div>
         </main>

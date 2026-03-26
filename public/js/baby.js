@@ -10,111 +10,184 @@ const motionIndicator = document.getElementById('motion-indicator');
 const audioIndicator = document.getElementById('audio-indicator');
 const camStatus = document.getElementById('cam-status');
 const micStatus = document.getElementById('mic-status');
-const loginOverlay = document.getElementById('login-overlay');
-const accessCodeInput = document.getElementById('access-code');
-const loginBtn = document.getElementById('login-btn');
-const loginError = document.getElementById('login-error');
-const logoutBtn = document.getElementById('logout-btn');
-const monitorContent = document.getElementById('monitor-content');
-const cryTypeEl = document.getElementById('cry-type');
 
 // Configuration
 const MOTION_THRESHOLD = 30; // Lowered to be more sensitive to motion
 const MOTION_PIXEL_COUNT_THRESHOLD = 2000; // Lowered to require fewer changed pixels
-const AUDIO_THRESHOLD = 0.08; // Lowered from 0.15 for higher sensitivity
-const COOLDOWN_MS = 2000; // 2 seconds between same-type alerts to make it lively
+const AUDIO_THRESHOLD = 0.15; // Volume threshold for fallback detection
+const COOLDOWN_MS = 2000; // 2 seconds between same-type alerts
+const TM_MODEL_URL = "https://teachablemachine.withgoogle.com/models/NSw1kr-Re/"; // User's custom model URL
 
 let lastMotionAlertTime = 0;
 let lastAudioAlertTime = 0;
 let previousFrame = null;
 let animationFrameId = null;
 let audioContext = null;
+let modelsLoaded = false;
+let recognizer = null;
+let indicatorTimeouts = new Map();
+let isDetectingExpression = false; // Prevention of scan clashes
+let audioAnalyser = null; // Frequency analyzer for manual validation
+let audioDataArray = null;
+const streamCanvas = document.createElement('canvas'); // Reusable canvas
+const sCtx = streamCanvas.getContext('2d', { alpha: false });
+streamCanvas.width = 320;
+streamCanvas.height = 240;
 
-// --- AI Model Loading --- //
-async function loadFaceModels() {
-    try {
-        console.log("Loading face-api models...");
-        // Use a reliable CDN for model weights
-        const MODEL_URL = 'https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights';
-        await Promise.all([
-            faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-            faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL)
-        ]);
-        console.log("Face-api models loaded.");
-        if (camStatus) camStatus.textContent = 'Active (Ready)';
-    } catch (err) {
-        console.error("Failed to load face-api models:", err);
-    }
-}
+const pinOverlay = document.getElementById('pin-overlay');
+const pinInput = document.getElementById('pin-input');
+const pinSubmit = document.getElementById('pin-submit');
+const pinError = document.getElementById('pin-error');
+const busyOverlay = document.getElementById('busy-overlay');
+const changeCodeBtn = document.getElementById('change-code-btn');
 
-// Start monitoring only after login
-document.addEventListener('DOMContentLoaded', () => {
-    loadFaceModels();
-    const savedCode = localStorage.getItem('baby_monitor_code');
-    if (savedCode) {
-        authenticate(savedCode);
-    }
-});
+let authenticated = false;
+let mediaStream = null;
+let mediaRecorder = null;
 
-loginBtn.addEventListener('click', () => {
-    const code = accessCodeInput.value;
-    authenticate(code);
-});
-
-logoutBtn.addEventListener('click', () => {
-    localStorage.removeItem('baby_monitor_code');
-    location.reload();
-});
-
-function authenticate(code) {
-    socket.emit('authenticate', code);
-}
-
-socket.on('authenticated', (response) => {
-    if (response.success) {
-        const code = accessCodeInput.value || localStorage.getItem('baby_monitor_code');
-        localStorage.setItem('baby_monitor_code', code);
-        loginOverlay.classList.add('hidden');
-        if (monitorContent) monitorContent.classList.remove('hidden');
-        startMonitoring();
+// Authenticate with the server
+pinSubmit.addEventListener('click', () => {
+    const code = pinInput.value;
+    if (code.length === 4) {
+        socket.emit('authenticate', code);
     } else {
-        localStorage.removeItem('baby_monitor_code');
-        loginError.classList.remove('hidden');
-        loginError.textContent = response.message || 'Invalid Access Code';
+        showPinError("Please enter a 4-digit code.");
     }
 });
+
+pinInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') pinSubmit.click();
+});
+
+function showPinError(msg) {
+    pinError.textContent = msg;
+    pinError.classList.remove('hidden');
+    setTimeout(() => pinError.classList.add('hidden'), 3000);
+}
+
+socket.on('authenticated', (data) => {
+    if (data.success) {
+        console.log("Successfully authenticated with server.");
+        authenticated = true;
+        pinOverlay.classList.add('hidden');
+        if (camStatus) camStatus.parentElement.style.borderBottom = "2px solid #4CAF50";
+        
+        // After authentication, register as the baby monitor
+        socket.emit('register_as_baby');
+    } else {
+        console.error("Authentication failed:", data.message);
+        showPinError(data.message || "Invalid access code.");
+    }
+});
+
+socket.on('registration_failed', (data) => {
+    console.error("Registration failed:", data.message);
+    busyOverlay.classList.remove('hidden');
+    document.getElementById('monitor-content').classList.add('hidden');
+    stopMonitoring();
+});
+
+socket.on('registration_success', () => {
+    console.log("Registered as active baby monitor.");
+    startMonitoring();
+    startFaceScanLoop();
+});
+
+socket.on('access_code_updated', (data) => {
+    alert(data.message + "\nYou will need to use the new PIN next time.");
+});
+
+changeCodeBtn.addEventListener('click', () => {
+    const newCode = prompt("Enter new 4-digit Parent PIN:");
+    if (newCode && newCode.length === 4 && /^\d+$/.test(newCode)) {
+        socket.emit('update_access_code', newCode);
+    } else if (newCode) {
+        alert("Invalid PIN. Must be 4 digits.");
+    }
+});
+
+// Resume AudioContext on first click to satisfy browser policies
+document.addEventListener('click', () => {
+    if (audioContext && audioContext.state === 'suspended') {
+        audioContext.resume();
+        console.log("AudioContext resumed.");
+    }
+}, { once: true });
+
+// Load face-api models
+async function loadModels() {
+    try {
+        console.log("Loading models...");
+        await faceapi.nets.ssdMobilenetv1.loadFromUri('/models');
+        await faceapi.nets.faceExpressionNet.loadFromUri('/models');
+        modelsLoaded = true;
+        console.log("Models loaded successfully");
+        if (document.getElementById('expression-type')) {
+            document.getElementById('expression-type').textContent = 'Ready';
+        }
+    } catch (err) {
+        console.error("Error loading models:", err);
+        if (document.getElementById('expression-type')) {
+            document.getElementById('expression-type').textContent = 'Model Error';
+        }
+    }
+}
+
+// Add authentication status listener
+socket.on('authenticated', (data) => {
+    if (data.success) {
+        console.log("Successfully authenticated with server.");
+        if (camStatus) camStatus.parentElement.style.borderBottom = "2px solid #4CAF50";
+    } else {
+        console.error("Authentication failed:", data.message);
+        alert("Server authentication failed. Please check the ACCESS_CODE.");
+    }
+});
+
+// Auto-load models on start
+loadModels();
+
+function stopMonitoring() {
+    if (mediaStream) {
+        mediaStream.getTracks().forEach(track => track.stop());
+    }
+    if (animationFrameId) cancelAnimationFrame(animationFrameId);
+    if (faceScanTimeout) clearTimeout(faceScanTimeout);
+    if (mediaRecorder) mediaRecorder.stop();
+}
 
 // --- Media Access & Monitoring --- //
 async function startMonitoring() {
     let stream;
     try {
-        console.log("Requesting camera and microphone...");
-        // Use simpler constraints to increase compatibility
+        // Try getting both video and audio first
         stream = await navigator.mediaDevices.getUserMedia({
-            video: true,
-            audio: true
+            video: { width: 640, height: 480, facingMode: 'user' },
+            audio: {
+                autoGainControl: false,
+                echoCancellation: false,
+                noiseSuppression: false
+            }
         });
-        console.log("Stream received with tracks:", stream.getTracks().map(t => `${t.kind}: ${t.label} (${t.readyState})`));
-
-        camStatus.textContent = 'Active (Stream Received)';
-        micStatus.textContent = 'Active (Stream Received)';
-        micStatus.classList.remove('error');
-        micStatus.classList.add('success');
-
-        startAudioDetection(stream);
+        camStatus.textContent = 'Active';
+        micStatus.textContent = 'Active';
+        setupFrequencyAnalyzer(stream);
+        startAudioDetection();
+        startAudioStreaming(stream);
     } catch (err) {
         console.warn('Initial media request failed, trying video only...', err);
+        // If it failed, maybe they don't have a mic. Try just video.
         try {
             stream = await navigator.mediaDevices.getUserMedia({
-                video: true
+                video: { width: 640, height: 480, facingMode: 'user' }
             });
-            console.log("Video-only stream received:", stream.getVideoTracks()[0]?.label);
-            camStatus.textContent = 'Active (Video Only)';
+            camStatus.textContent = 'Active';
             micStatus.textContent = 'Failed (No Mic)';
             micStatus.classList.replace('success', 'error');
+            console.warn('Running without audio detection.');
         } catch (videoErr) {
             handleMediaError(videoErr);
-            return;
+            return; // Stop execution
         }
     }
 
@@ -124,48 +197,15 @@ async function startMonitoring() {
         video.play().catch(e => console.error("Error playing video:", e));
     };
 
-    // Wait for video metadata to load for accurate sizes and cap for "long distance" performance
+    // Wait for video metadata to load for accurate sizes
     video.addEventListener('loadedmetadata', () => {
-        // Cap resolution to 480p equivalent for stable transmission over long distances
-        const maxWidth = 640;
-        const maxHeight = 480;
-        let targetWidth = video.videoWidth;
-        let targetHeight = video.videoHeight;
-
-        if (targetWidth > maxWidth) {
-            targetHeight = Math.floor(targetHeight * (maxWidth / targetWidth));
-            targetWidth = maxWidth;
-        }
-        if (targetHeight > maxHeight) {
-            targetWidth = Math.floor(targetWidth * (maxHeight / targetHeight));
-            targetHeight = maxHeight;
-        }
-
-        canvas.width = targetWidth;
-        canvas.height = targetHeight;
-        console.log(`Canvas resolution capped at: ${canvas.width}x${canvas.height}`);
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
     });
 
     video.addEventListener('play', () => {
-        console.log("Video playback started.");
-        camStatus.textContent = 'Active (Playing)';
-        camStatus.classList.replace('error', 'success');
         detectMotion();
     });
-
-    // Manual play fallback
-    video.style.cursor = 'pointer';
-    video.title = 'Click to start camera if it does not load';
-    video.onclick = () => {
-        console.log("Manual play triggered by click.");
-        camStatus.textContent = 'Attempting manual play...';
-        video.play().then(() => {
-            console.log("Manual play success");
-        }).catch(err => {
-            console.error("Manual play failed:", err);
-            handleMediaError(err);
-        });
-    };
 }
 
 function handleMediaError(err) {
@@ -215,18 +255,20 @@ function detectMotion() {
         }
 
         if (changedPixels > MOTION_PIXEL_COUNT_THRESHOLD) {
-            handleEvent('Movement', 'Movement Detected');
+            handleEvent('Movement');
             showIndicator(motionIndicator);
         }
     }
 
     // Save current frame for next comparison
     previousFrame = new Uint8ClampedArray(data);
+    
+    // Draw to scaling canvas (reuse persistent canvas for performance)
+    sCtx.drawImage(canvas, 0, 0, 320, 240);
 
-    // Broadcast video frame over Socket.IO
-    // "Long distance" optimization: use lower quality (0.3) for stability
-    const frameData = canvas.toDataURL('image/jpeg', 0.3); 
-    socket.emit('video_frame', frameData);
+    // Broadcast video frame over Socket.IO with high compression (0.3)
+    // JPEG quality 0.3 is highly optimized for "long distance" stability
+    socket.emit('video_frame', streamCanvas.toDataURL('image/jpeg', 0.3));
 
     // Throttle next frame to ~5-10 FPS for bandwidth and allow running in background
     setTimeout(() => {
@@ -234,13 +276,74 @@ function detectMotion() {
     }, 150);
 }
 
-// --- AI Audio (Cry) Detection --- //
-// URL TO YOUR TEACHABLE MACHINE MODEL
-const URL = "https://teachablemachine.withgoogle.com/models/NSw1kr-Re/";
+// --- Manual Frequency Validation --- //
+
+function setupFrequencyAnalyzer(stream) {
+    try {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        const context = new AudioContext();
+        const source = context.createMediaStreamSource(stream);
+        audioAnalyser = context.createAnalyser();
+        audioAnalyser.fftSize = 256;
+        
+        const bufferLength = audioAnalyser.frequencyBinCount;
+        audioDataArray = new Uint8Array(bufferLength);
+        
+        source.connect(audioAnalyser);
+        console.log("Frequency analyzer initialized.");
+        
+        // Save context globally for resumption
+        audioContext = context;
+    } catch (err) {
+        console.warn("Failed to setup frequency analyzer:", err);
+    }
+}
+
+function checkCryFrequencies() {
+    if (!audioAnalyser || !audioDataArray) return true; // Fallback if failed
+
+    audioAnalyser.getByteFrequencyData(audioDataArray);
+    
+    // Frequency bins calculation (assuming 44.1kHz sample rate):
+    // Each bin is ~172 Hz (44100 / 256)
+    // Bin 0: 0-172
+    // Bin 1: 172-344 (Fundamental Range Start)
+    // Bin 2: 344-516 (Fundamental Range)
+    // Bin 11-23: ~2000-4000 Hz (Harmonics Range)
+
+    // Check Energy in Fundamental Range (200-600Hz)
+    const fundamentalEnergy = (audioDataArray[1] + audioDataArray[2] + audioDataArray[3]) / 3;
+    
+    // Check Energy in Piercing Range (2000-4000Hz)
+    let harmonicsEnergy = 0;
+    for (let i = 11; i <= 23; i++) {
+        harmonicsEnergy += audioDataArray[i];
+    }
+    harmonicsEnergy /= 13;
+
+    // Check Energy in Distracting Range (High end)
+    let highEndEnergy = 0;
+    for (let i = 40; i < audioDataArray.length; i++) {
+        highEndEnergy += audioDataArray[i];
+    }
+    highEndEnergy /= (audioDataArray.length - 40);
+
+    // Baby cry criteria: 
+    // 1. Significant energy in the base pitch (fundamental)
+    // 2. Strong presence in the "piercing" harmonics band
+    // 3. Overall louder than high-end static/noise
+    const hasBasePitch = fundamentalEnergy > 20; // Lowered from 40 for sensitivity
+    const hasPiercingHarmonics = harmonicsEnergy > 15; // Lowered from 30 for sensitivity
+    const isNotHighStatic = harmonicsEnergy > (highEndEnergy * 1.2); // Lowered from 1.5
+
+    return (hasBasePitch && hasPiercingHarmonics && isNotHighStatic);
+}
+
+// --- Audio Detection (Teachable Machine AI) --- //
 
 async function createModel() {
-    const checkpointURL = URL + "model.json";
-    const metadataURL = URL + "metadata.json";
+    const checkpointURL = TM_MODEL_URL + "model.json";
+    const metadataURL = TM_MODEL_URL + "metadata.json";
 
     const recognizer = speechCommands.create(
         "BROWSER_FFT",
@@ -249,277 +352,162 @@ async function createModel() {
         metadataURL
     );
 
+    // check that model and metadata are loaded via HTTPS requests.
     await recognizer.ensureModelLoaded();
     return recognizer;
 }
 
-async function startAudioDetection(stream) {
-    // If the user hasn't put in a real AI model yet, fallback to the custom basic frequency detection
-    if (URL === "https://teachablemachine.withgoogle.com/models/YOUR_MODEL_LINK_HERE/") {
-        console.warn("AI Model not trained. Using fallback legacy frequency detection. Please paste your Teachable Machine URL in baby.js.");
-        startFallbackAudioDetection(stream);
-        return;
-    }
+async function startAudioDetection() {
+    console.log("Initializing Teachable Machine Audio...");
+    const cryTypeEl = document.getElementById('cry-type');
+    const visualizerBar = document.getElementById('visualizer-bar');
 
     try {
-        const recognizer = await createModel();
-        const classLabels = recognizer.wordLabels();
+        recognizer = await createModel();
+        const classLabels = recognizer.wordLabels(); // get class labels
+        
+        console.log("Teachable Machine Model Loaded. Labels:", classLabels);
 
-        // Volume Gate: Add Analyser to check volume level along with AI confidence
-        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const source = audioCtx.createMediaStreamSource(stream);
-        const analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 1024; // Higher resolution for frequency analysis
-        source.connect(analyser);
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-        const binSize = (audioCtx.sampleRate / 2) / analyser.frequencyBinCount;
-
-        // Add a real-time prediction viewer on the screen for debugging
-        const controlsCard = document.querySelector('.controls-card .status-grid');
-        if (controlsCard) {
-            controlsCard.innerHTML += `
-            <div class="status-item">
-                <span class="label">AI is hearing:</span>
-                <span id="ai-prediction" class="value" style="color:var(--primary-color)">Listening...</span>
-            </div>`;
-        }
-
+        // listen() takes two arguments:
+        // 1. A callback function that is invoked anytime a word is recognized.
+        // 2. A configuration object with probabilityThreshold
         recognizer.listen(result => {
-            const scores = result.scores;
-
-            // Check current volume and frequency distribution
-            analyser.getByteFrequencyData(dataArray);
-            let noiseEnergy = 0; // 50Hz - 400Hz (Fans, Motors, Background Hum)
-            let cryEnergy = 0;   // 800Hz - 3000Hz (Standard Baby Cry Harmonics)
-            let peakVol = 0;
-            let sum = 0;
-
-            for (let i = 0; i < dataArray.length; i++) {
-                const freq = i * binSize;
-                const val = dataArray[i];
-                sum += val;
-                if (val > peakVol) peakVol = val;
-                if (freq >= 50 && freq <= 400) noiseEnergy += val;
-                else if (freq >= 800 && freq <= 3000) cryEnergy += val;
-            }
+            const scores = result.scores; // probability of prediction for each class
             
-            const avgVol = sum / dataArray.length;
-            const cryRatio = noiseEnergy > 0 ? (cryEnergy / noiseEnergy).toFixed(1) : "0";
-
+            // Find the index of the highest score
             let maxScore = 0;
-            let maxClass = "";
-            for (let i = 0; i < classLabels.length; i++) {
+            let maxIndex = 0;
+            for (let i = 0; i < scores.length; i++) {
                 if (scores[i] > maxScore) {
                     maxScore = scores[i];
-                    maxClass = classLabels[i];
+                    maxIndex = i;
                 }
             }
 
-            const predictionEl = document.getElementById('ai-prediction');
-            if (predictionEl) {
-                // Show Peak instead of Average for better user calibration
-                predictionEl.textContent = `${maxClass} (${Math.round(maxScore * 100)}%) | Peak: ${peakVol} | C/S Ratio: ${cryRatio}`;
+            const label = classLabels[maxIndex];
+            const confidence = (maxScore * 100).toFixed(0);
+
+            // Update UI Visualizer (Simulated from scores for activity feedback)
+            if (visualizerBar) {
+                const activityLevel = Math.max(...scores.slice(1)) * 100; // Ignore background noise for bar height
+                visualizerBar.style.transform = `scaleY(${1 + (activityLevel / 20)})`;
+                visualizerBar.style.backgroundColor = activityLevel > 50 ? '#ff4081' : '#4CAF50';
             }
 
-            // The model has classes like "Background Noise", "Burp", "Discomfort", "hungry", "pain", "sleepy"
-            // We ONLY want to trigger on actual baby cries, which in your model are "hungry", "pain", and "sleepy"
-            const cryClasses = ["hungry", "pain", "sleepy", "cry", "baby cry"];
-            const detectedClass = maxClass.toLowerCase().trim();
+            // Detection Logic
+            // Note: Common labels are "Background Noise", "None", or "Cry"
+            // We look for "Cry" or anything similar that isn't "Background" or "Silence"
+            const lowercaseLabel = label.toLowerCase();
+            // Broader matching: catch anything that isn't 'background' or 'silence' if it's strong enough
+            const isCrying = (lowercaseLabel.includes('cry') || lowercaseLabel.includes('baby') || lowercaseLabel.includes('scream')) && 
+                             maxScore > 0.15 && 
+                             checkCryFrequencies();
 
-            // Handle as 'Baby Cry' with Advanced Filtering:
-            // 1. Must be a cry class
-            // 2. High confidence (> 0.80 - raised to prevent noise false positives)
-            // 3. Significant Peak (peakVol > 100)
-            // 4. Frequency Check: Cry Energy must be notably higher than Noise Energy (ratio > 1.6)
-            if (cryClasses.includes(detectedClass) && maxScore > 0.80 && peakVol > 100 && parseFloat(cryRatio) > 1.6) {
-                // Determine if it was a cry or just noise
-                const isActualCry = (detectedClass === 'hungry' || detectedClass === 'pain' || detectedClass === 'sleepy' || detectedClass === 'cry' || detectedClass === 'baby cry');
-
-                if (isActualCry) {
-                    handleEvent('Baby Cry', maxClass);
+            if (isCrying) {
+                if (cryTypeEl) {
+                    cryTypeEl.textContent = `Crying Detected (${confidence}%)`;
+                    cryTypeEl.style.color = '#ff4081';
+                }
+                
+                // snappier UI visual feedback
+                if (audioIndicator) {
+                    audioIndicator.textContent = "Baby Crying Detected";
                     showIndicator(audioIndicator);
-
-                    if (cryTypeEl) {
-                        cryTypeEl.textContent = `AI Detected: ${maxClass}`;
+                }
+                
+                // TRIGGER: Use face to classify the reason/expression (Async)
+                detectExpression(true); 
+            } else {
+                if (cryTypeEl) {
+                    if (maxScore > 0.5) {
+                        cryTypeEl.textContent = `${label} (${confidence}%)`;
+                        cryTypeEl.style.color = 'rgba(255,255,255,0.7)';
+                    } else {
+                        cryTypeEl.textContent = 'Listening...';
+                        cryTypeEl.style.color = 'rgba(255,255,255,0.4)';
                     }
-                    
-                    // Trigger Facial Analysis to find out WHY the baby is crying
-                    startFacialBurst();
                 }
             }
         }, {
-            includeSpectrogram: false,
-            probabilityThreshold: 0.80, // Raised threshold to be more selective
+            includeSpectrogram: true,
+            probabilityThreshold: 0.15, // Lowered from 0.30 to catch low sound
             invokeCallbackOnNoiseAndUnknown: true,
-            overlapFactor: 0.50 // How often to sample (0.50 is half a second)
+            overlapFactor: 0.75
         });
 
-    } catch (e) {
-        console.error("AI Model failed to load:", e);
-        startFallbackAudioDetection(stream);
+        micStatus.textContent = 'AI Active';
+        micStatus.classList.replace('error', 'success');
+
+    } catch (err) {
+        console.error("Teachable Machine Audio Error:", err);
+        micStatus.textContent = 'AI Load Error';
+        micStatus.classList.replace('success', 'error');
+        if (cryTypeEl) cryTypeEl.textContent = 'AI Error: Check console';
     }
 }
 
-// Fallback logic until an AI model is properly trained & linked above
-function startFallbackAudioDetection(stream) {
-    audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    const source = audioContext.createMediaStreamSource(stream);
-    const analyser = audioContext.createAnalyser();
-
-    analyser.fftSize = 1024;
-    source.connect(analyser);
-
-    const bufferLength = analyser.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
-    const sampleRate = audioContext.sampleRate;
-    const binSize = (sampleRate / 2) / bufferLength;
-
-    function checkVolume() {
-        analyser.getByteFrequencyData(dataArray);
-
-        let peakCry = 0;
-        let noiseEnergy = 0;
-        let cryEnergy = 0;
-        let noiseBins = 0;
-        let cryBins = 0;
-
-        for (let i = 0; i < bufferLength; i++) {
-            const freq = i * binSize;
-            const value = dataArray[i];
-            
-            if (value > peakCry) peakCry = value; // Track the peak volume
-
-            if (freq >= 50 && freq <= 350) {
-                noiseEnergy += value;
-                noiseBins++;
-            } else if (freq >= 800 && freq <= 2500) {
-                cryEnergy += value;
-                cryBins++;
-            }
+// --- Live Audio Streaming --- //
+function startAudioStreaming(stream) {
+    try {
+        // Use MediaRecorder to send audio chunks
+        // Check for supported types, opus is preferred
+        const options = { mimeType: 'audio/webm;codecs=opus' };
+        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+            console.warn("Opus not supported, using default");
+            delete options.mimeType;
         }
 
-        const avgNoise = noiseBins > 0 ? noiseEnergy / noiseBins : 0;
-        const avgCry = cryBins > 0 ? cryEnergy / cryBins : 0;
-
-        // Use Peak for much stricter suppression of noise
-        const minimumPeakValue = 120; // Increased from 100 to avoid static
-
-        // Simply trigger for a baby cry (no sub-types anymore!)
-        if (peakCry > minimumPeakValue && avgCry > avgNoise * 1.6) {
-            handleEvent('Baby Cry', 'Cry Detected');
-            showIndicator(audioIndicator);
-            if (cryTypeEl) {
-                cryTypeEl.textContent = `Cry Detected`;
+        mediaRecorder = new MediaRecorder(stream, options);
+        
+        mediaRecorder.ondataavailable = (event) => {
+            if (event.data.size > 0 && socket.connected) {
+                // Convert Blob to ArrayBuffer to send over socket
+                event.data.arrayBuffer().then(buffer => {
+                    socket.emit('audio_chunk', buffer);
+                });
             }
-            
-            // Trigger Facial Analysis to find out WHY the baby is crying
-            startFacialBurst();
-        }
+        };
 
-        setTimeout(checkVolume, 250);
+        // Send chunks every 500ms for "live" feel with low latency
+        mediaRecorder.start(500);
+        console.log("Audio streaming started.");
+    } catch (err) {
+        console.error("Error starting audio streaming:", err);
     }
-
-    checkVolume();
-}
-
-// --- Facial Analysis Burst --- //
-let isAnalyzingFace = false;
-
-async function startFacialBurst() {
-    if (isAnalyzingFace) return;
-    isAnalyzingFace = true;
-    
-    const expressionTypeEl = document.getElementById('expression-type');
-    const expressionStatusEl = document.getElementById('expression-status');
-    
-    if (expressionTypeEl) expressionTypeEl.textContent = "Analyzing Face...";
-    if (expressionStatusEl) {
-        expressionStatusEl.textContent = "Reasoning...";
-        expressionStatusEl.classList.remove('hidden');
-    }
-
-    console.log("Starting 3s facial analysis burst...");
-    const results = [];
-    const endTime = Date.now() + 3000;
-
-    while (Date.now() < endTime) {
-        // Detect expression
-        try {
-            const detection = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions())
-                .withFaceExpressions();
-                
-            if (detection) {
-                results.push(detection.expressions);
-            }
-        } catch (e) {
-            console.error("Analysis frame error:", e);
-        }
-        await new Promise(r => setTimeout(r, 250)); // Sample every 250ms
-    }
-
-    finalizeBurst(results);
-}
-
-function finalizeBurst(results) {
-    isAnalyzingFace = false;
-    const expressionTypeEl = document.getElementById('expression-type');
-    const expressionStatusEl = document.getElementById('expression-status');
-
-    if (results.length === 0) {
-        if (expressionTypeEl) expressionTypeEl.textContent = "Face Not Clear";
-        if (expressionStatusEl) expressionStatusEl.textContent = "...";
-        return;
-    }
-
-    // Accumulate scores
-    const totals = { happy:0, sad:0, fearful:0, angry:0, neutral:0, disgusted:0, surprised:0 };
-    results.forEach(res => {
-        Object.keys(totals).forEach(key => {
-            if (res[key]) totals[key] += res[key];
-        });
-    });
-
-    // Find dominant
-    const dominant = Object.entries(totals).reduce((a, b) => a[1] > b[1] ? a : b)[0];
-    
-    // Map to reasons
-    let reason = "Undetermined";
-    if (['sad', 'fearful', 'angry'].includes(dominant)) reason = "Hungry / Discomfort";
-    else if (['neutral', 'disgusted', 'surprised'].includes(dominant)) reason = "Sleepy / Bored";
-    else if (dominant === 'happy') reason = "Just Playful";
-
-    console.log("Dominant Expression:", dominant, "->", reason);
-    
-    if (expressionTypeEl) expressionTypeEl.textContent = reason;
-    if (expressionStatusEl) {
-        expressionStatusEl.textContent = reason;
-        setTimeout(() => { if (expressionStatusEl) expressionStatusEl.classList.add('hidden'); }, 5000);
-    }
-
-    // Send to mother
-    socket.emit('expression_alert', { reason: reason, type: dominant });
 }
 
 // --- UI & Event Handling --- //
 function showIndicator(element) {
+    if (indicatorTimeouts.has(element)) {
+        clearTimeout(indicatorTimeouts.get(element));
+    }
     element.classList.remove('hidden');
-    // Hide after 2 seconds
-    setTimeout(() => {
+    const timer = setTimeout(() => {
         element.classList.add('hidden');
-    }, 2000);
+        indicatorTimeouts.delete(element);
+    }, 3000); // 3 seconds for better visibility
+    indicatorTimeouts.set(element, timer);
 }
 
 function handleEvent(eventType, subType = '') {
     const now = Date.now();
 
-    // Check cooldowns to avoid spam
     if (eventType === 'Movement' && (now - lastMotionAlertTime < COOLDOWN_MS)) return;
     if (eventType === 'Baby Cry' && (now - lastAudioAlertTime < COOLDOWN_MS)) return;
 
-    if (eventType === 'Movement') lastMotionAlertTime = now;
-    if (eventType === 'Baby Cry') lastAudioAlertTime = now;
+    if (eventType === 'Movement') {
+        lastMotionAlertTime = now;
+        showIndicator(motionIndicator);
+    }
+    
+    if (eventType === 'Baby Cry') {
+        lastAudioAlertTime = now;
+        if (audioIndicator) {
+            audioIndicator.textContent = "Baby Crying Detected";
+            showIndicator(audioIndicator);
+        }
+    }
 
-    // Format date and time
     const dateObj = new Date();
     const dateStr = dateObj.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' }).replace(/\//g, '-');
     const timeStr = dateObj.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
@@ -534,4 +522,87 @@ function handleEvent(eventType, subType = '') {
 
     console.log('Sending alert:', alertData);
     socket.emit('baby_alert', alertData);
+}
+
+// --- Facial Expression Detection --- //
+let faceScanTimeout = null;
+
+async function startFaceScanLoop() {
+    if (faceScanTimeout) clearTimeout(faceScanTimeout);
+    
+    // Scan every 1 second to give user feedback
+    await detectExpression(false);
+    
+    faceScanTimeout = setTimeout(startFaceScanLoop, 1000);
+}
+
+async function detectExpression(isCryTrigger = false) {
+    if (!modelsLoaded || video.paused || video.ended || isDetectingExpression) return;
+
+    isDetectingExpression = true; // Lock
+
+    const expressionTypeEl = document.getElementById('expression-type');
+    const expressionResultCard = document.getElementById('expression-result');
+    
+    try {
+        // High sensitivity: lowered minConfidence to 0.25
+        const detections = await faceapi.detectSingleFace(video, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.25 }))
+            .withFaceExpressions();
+
+        let reason = "Normal";
+        let topExpression = "";
+
+        if (detections) {
+            const expressions = detections.expressions;
+            topExpression = Object.keys(expressions).reduce((a, b) => expressions[a] > expressions[b] ? a : b);
+            
+            switch(topExpression) {
+                case 'angry': reason = "Hungry / Frustrated"; break;
+                case 'sad': reason = "Sleepy / Lonely"; break;
+                case 'fearful': reason = "Discomfort / Scared"; break;
+                case 'disgusted': reason = "Check Nappy"; break;
+                case 'surprised': reason = "Startled"; break;
+                case 'happy': reason = "Playing / Calm"; break;
+                default: reason = "Crying (Unknown)";
+            }
+
+            if (expressionTypeEl) {
+                expressionTypeEl.textContent = reason;
+                expressionTypeEl.style.color = '#fff';
+            }
+            
+            // Visual feedback: Highlight the card green when face is detected
+            if (expressionResultCard) {
+                expressionResultCard.style.backgroundColor = 'rgba(76, 175, 80, 0.2)'; // Faint green
+                expressionResultCard.style.borderColor = '#4CAF50';
+            }
+            
+            // Send standalone expression broadcast
+            socket.emit('expression_alert', { reason: reason, expression: topExpression });
+        } else {
+            // No face detected in this frame
+            if (expressionTypeEl) {
+                // If it's just a background scan, don't show "Face Not Seen" if we were just seeing one
+                // unless it stays gone.
+                if (isCryTrigger) expressionTypeEl.textContent = 'Face Not Seen';
+            }
+            
+            if (expressionResultCard) {
+                expressionResultCard.style.backgroundColor = '';
+                expressionResultCard.style.borderColor = '';
+            }
+            
+            reason = "Crying (Face not visible)";
+        }
+
+        // If this was triggered by a cry sound, send the official alert now
+        if (isCryTrigger) {
+            handleEvent('Baby Cry', reason);
+        }
+
+    } catch (err) {
+        console.error("Expression detection error:", err);
+    } finally {
+        isDetectingExpression = false; // Unlock
+    }
 }
