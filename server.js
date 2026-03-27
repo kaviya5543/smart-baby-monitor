@@ -45,7 +45,10 @@ try {
     db = admin.firestore();
 } catch (error) {
     console.error('CRITICAL: Firebase initialization failed:', error.message);
-    db = null;
+    console.error('The server cannot start without a valid Firebase connection.');
+    console.error('Ensure the FIREBASE_SERVICE_ACCOUNT environment variable is set correctly in production,');
+    console.error('or that firebase-service-account.json exists locally.');
+    process.exit(1);
 }
 
 const app = express();
@@ -54,6 +57,18 @@ const io = new Server(server);
 
 // Serve static files from the public directory
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Health check endpoint — verifies Firebase is reachable
+app.get('/health', async (req, res) => {
+    try {
+        // A lightweight probe: fetch a non-existent doc just to confirm connectivity
+        await db.collection('_health').doc('ping').get();
+        res.status(200).json({ status: 'ok', firebase: 'connected' });
+    } catch (err) {
+        console.error('Health check: Firebase probe failed:', err.message);
+        res.status(503).json({ status: 'error', firebase: 'unreachable', detail: err.message });
+    }
+});
 
 let currentAccessCode = process.env.ACCESS_CODE || '1234';
 let babySocketId = null;
@@ -145,7 +160,13 @@ io.on('connection', async (socket) => {
 
     async function sendInitialData(socket) {
         if (!socket.authenticated) return; // Ensure authenticated before sending data
-        
+
+        if (!db) {
+            console.error('sendInitialData: Firestore is not initialized — skipping alert fetch.');
+            socket.emit('initial_alerts', []);
+            return;
+        }
+
         // Send existing alerts from the last 24 hours to the newly connected mother dashboard
         const now = Date.now();
         const oneDayAgo = now - 86400000;
@@ -173,6 +194,13 @@ io.on('connection', async (socket) => {
             return;
         }
         console.log('Received alert:', alertData);
+
+        if (!db) {
+            console.error('baby_alert: Firestore is not initialized — alert will not be persisted.');
+            socket.broadcast.emit('new_alert', alertData);
+            return;
+        }
+
         try {
             // Add to our database
             const docRef = await db.collection('alerts').add({
@@ -269,6 +297,10 @@ io.on('connection', async (socket) => {
 // Clean up alerts older than 24 hours (86400000 ms) in the database
 const CLEANUP_INTERVAL = 60 * 60 * 1000; // run every hour
 setInterval(async () => {
+    if (!db) {
+        console.error('Cleanup interval: Firestore is not initialized — skipping cleanup.');
+        return;
+    }
     const oneDayAgo = Date.now() - 86400000;
     try {
         const snapshot = await db.collection('alerts')
